@@ -1,6 +1,6 @@
 import io
 import json
-import fitz  # PyMuPDF for drawing/stamping on PDFs
+import fitz  # PyMuPDF
 import pandas as pd
 import pypdfium2 as pdfium
 import streamlit as st
@@ -17,17 +17,17 @@ st.set_page_config(
 st.title("📑 Smart Invoice GL Coder & Annotated PDF Generator")
 st.caption(
     "Upload any vendor invoice (Sysco, Guest Supply, HD Supply, Utilities,"
-    " etc.). The AI extracts GL categories, checks balance math, and stamps the"
-    " GL breakdown directly onto your PDF."
+    " etc.). The AI extracts GL categories, verifies balance totals, and"
+    " stamps the summary directly onto your PDF."
 )
 
-# API Key handling
+# API Key handling from Streamlit Secrets or sidebar fallback
 api_key = st.secrets.get("GEMINI_API_KEY", None)
 if not api_key:
   api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
 if not api_key:
-  st.warning("Please configure your GEMINI_API_KEY to continue.")
+  st.warning("Please configure your GEMINI_API_KEY in Secrets or sidebar.")
   st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -47,35 +47,29 @@ def get_pdf_images(pdf_bytes):
 
 
 def stamp_gl_summary_on_pdf(pdf_bytes, data):
-  """Stamps a handwritten-style red GL summary block directly on the last page of the PDF."""
+  """Stamps a red GL summary block directly on the last page of the PDF."""
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-  page = doc[-1]  # Stamp on the final summary/total page
+  page = doc[-1]
 
-  # Bounding box for the summary block on the right-hand margin / footer
   rect = fitz.Rect(
-      page.rect.width - 240, page.rect.height - 280, page.rect.width - 20,
-      page.rect.height - 30
+      page.rect.width - 250, page.rect.height - 290, page.rect.width - 15,
+      page.rect.height - 20
   )
-
-  # Draw a subtle background box
   page.draw_rect(
       rect, color=(0.8, 0.1, 0.1), fill=(1, 0.96, 0.96), width=1.5
   )
 
-  # Build text content
   lines = ["--- GL SUMMARY ---"]
   for item in data.get("gl_summary", []):
     lines.append(
         f"{item['gl_name'][:14]} {item['gl_code']}: ${item['subtotal']:,.2f}"
     )
-
   lines.append("-------------------")
   lines.append(f"TOTAL: ${data.get('invoice_total', 0.0):,.2f}")
 
-  text_content = "\n".join(lines)
   page.insert_textbox(
       rect + (8, 8, -8, -8),
-      text_content,
+      "\n".join(lines),
       fontsize=9,
       fontname="helv",
       color=(0.75, 0.0, 0.0),
@@ -96,7 +90,6 @@ if uploaded_file is not None:
   else:
     images = [Image.open(io.BytesIO(file_bytes))]
 
-  # Layout: Left column for raw preview, Right column for processed output
   col_left, col_right = st.columns([1, 1])
 
   with col_left:
@@ -110,7 +103,7 @@ if uploaded_file is not None:
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
     if st.button("🚀 Analyze & Generate Coded Breakdown", type="primary"):
-      with st.spinner("Analyzing document structure & assigning GL codes..."):
+      with st.spinner("Analyzing invoice & assigning GL codes..."):
         prompt = """
                 You are an expert hospitality & hotel accountant.
                 Analyze all pages of this vendor invoice. Extract header data, itemize the purchased lines, and aggregate the subtotals strictly into standard hotel General Ledger (GL) accounts.
@@ -136,8 +129,8 @@ if uploaded_file is not None:
 
                 Return ONLY valid JSON with this exact structure:
                 {
-                    "vendor": "Extracted Vendor Name",
-                    "invoice_number": "Invoice / Order #",
+                    "vendor": "Vendor Name",
+                    "invoice_number": "Invoice Number",
                     "invoice_date": "YYYY-MM-DD",
                     "invoice_total": 0.00,
                     "gl_summary": [
@@ -149,8 +142,8 @@ if uploaded_file is not None:
                     ],
                     "items": [
                         {
-                            "item_code": "Item SKU / Pack",
-                            "description": "Short description",
+                            "item_code": "SKU",
+                            "description": "Description",
                             "amount": 0.00,
                             "gl_code": "5301.1",
                             "gl_name": "Dairy"
@@ -159,17 +152,29 @@ if uploaded_file is not None:
                 }
                 """
 
-        contents = [prompt] + images
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            ),
-        )
+        # Convert images into SDK part bytes
+        contents = [prompt]
+        for img in images:
+          img_buffer = io.BytesIO()
+          img.convert("RGB").save(img_buffer, format="JPEG", quality=85)
+          contents.append(
+              types.Part.from_bytes(
+                  data=img_buffer.getvalue(),
+                  mime_type="image/jpeg",
+              )
+          )
 
-        data = json.loads(response.text)
-        st.session_state["invoice_data"] = data
+        try:
+          response = client.models.generate_content(
+              model="gemini-2.0-flash",
+              contents=contents,
+              config=types.GenerateContentConfig(
+                  response_mime_type="application/json"
+              ),
+          )
+          st.session_state["invoice_data"] = json.loads(response.text)
+        except Exception as e:
+          st.error(f"Generation error: {e}")
 
     if "invoice_data" in st.session_state:
       data = st.session_state["invoice_data"]
@@ -184,7 +189,7 @@ if uploaded_file is not None:
       df_summary = pd.DataFrame(data.get("gl_summary", []))
       st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
-      # Balance Check
+      # Balance Math Check
       calc_sum = df_summary["subtotal"].sum() if not df_summary.empty else 0.0
       inv_tot = data.get("invoice_total", 0.0)
       if abs(calc_sum - inv_tot) < 0.05:
@@ -192,18 +197,15 @@ if uploaded_file is not None:
             f"✅ Math Balanced: Subtotals match Invoice Total (${inv_tot:,.2f})"
         )
       else:
-        st.error(
+        st.warning(
             f"⚠️ Difference of ${abs(calc_sum - inv_tot):,.2f} detected between"
             " items and invoice total."
         )
 
-      # Downloads Section
       st.markdown("---")
       st.markdown("#### 📥 Download Processed Files")
-
       d_col1, d_col2 = st.columns(2)
 
-      # 1. Stamped PDF Download
       if is_pdf:
         stamped_pdf_bytes = stamp_gl_summary_on_pdf(file_bytes, data)
         d_col1.download_button(
@@ -214,7 +216,6 @@ if uploaded_file is not None:
             type="primary",
         )
 
-      # 2. Excel Download
       excel_out = io.BytesIO()
       with pd.ExcelWriter(excel_out, engine="openpyxl") as writer:
         df_summary.to_excel(writer, sheet_name="GL Summary", index=False)
