@@ -18,17 +18,23 @@ st.set_page_config(
 st.title("📑 Smart Invoice GL Coder & Annotated PDF Generator")
 st.caption(
     "Upload any vendor invoice (Sysco, Guest Supply, HD Supply, Utilities,"
-    " etc.). The AI extracts GL categories, verifies math balance, and stamps"
-    " red markup arrows with corrected GL codes directly on the PDF."
+    " etc.). The AI extracts GL categories across all pages, verifies math"
+    " balance, and stamps red markup arrows with corrected GL codes directly on"
+    " the PDF."
 )
 
-# Sidebar API Key & Model Configuration
+# -------------------------------------------------------------
+# 1. API Key & Client Setup
+# -------------------------------------------------------------
 api_key = st.secrets.get("GEMINI_API_KEY", None)
 if not api_key:
   api_key = st.sidebar.text_input("Enter Gemini API Key", type="password")
 
 if not api_key:
-  st.warning("Please configure your GEMINI_API_KEY in Secrets or sidebar.")
+  st.warning(
+      "Please configure your GEMINI_API_KEY in Secrets or the sidebar to"
+      " continue."
+  )
   st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -37,9 +43,7 @@ uploaded_file = st.file_uploader(
     "Upload Vendor Invoice (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"]
 )
 
-# -------------------------------------------------------------
-# 1. Reset state when a new file is uploaded
-# -------------------------------------------------------------
+# Reset state when a new file is uploaded
 if uploaded_file is not None:
   file_identifier = f"{uploaded_file.name}_{uploaded_file.size}"
   if st.session_state.get("current_file_id") != file_identifier:
@@ -61,24 +65,26 @@ def get_pdf_images(pdf_bytes):
 # 2. PDF Annotation with Red Markup Arrows & GL Summary Box
 # -------------------------------------------------------------
 def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
-  """Stamps a red summary block and draws handwritten-style markup arrows with GL codes next to items."""
+  """Stamps a red summary block and draws markup arrows with GL codes next to line items."""
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
   red_color = (0.8, 0.05, 0.05)
 
+  # Draw line item annotations on relevant pages
   for page in doc:
     for item in data.get("items", []):
-      search_term = item.get("item_code", "").strip()
+      search_term = str(item.get("item_code", "")).strip()
       if not search_term or len(search_term) < 3:
-        search_term = item.get("description", "")[:14].strip()
+        search_term = str(item.get("description", ""))[:14].strip()
 
       if not search_term:
         continue
 
       rects = page.search_for(search_term)
       for rect in rects[:1]:
-        arrow_start = fitz.Point(rect.x1 + 10, rect.y0 + (rect.height / 2))
-        arrow_end = fitz.Point(rect.x1 + 35, rect.y0 + (rect.height / 2))
+        arrow_start = fitz.Point(rect.x1 + 8, rect.y0 + (rect.height / 2))
+        arrow_end = fitz.Point(rect.x1 + 32, rect.y0 + (rect.height / 2))
 
+        # Draw red markup arrow ->
         page.draw_line(arrow_start, arrow_end, color=red_color, width=1.2)
         page.draw_line(
             fitz.Point(arrow_end.x - 4, arrow_end.y - 3),
@@ -93,9 +99,8 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
             width=1.2,
         )
 
-        annotation_text = (
-            f"{item.get('gl_code', '')} ({item.get('gl_name', '')[:8]})"
-        )
+        # Write corrected GL code & short name
+        annotation_text = f"{item.get('gl_code', '')} ({str(item.get('gl_name', ''))[:8]})"
         page.insert_text(
             fitz.Point(arrow_end.x + 5, arrow_end.y + 3),
             annotation_text,
@@ -104,6 +109,7 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
             color=red_color,
         )
 
+  # Stamp final GL Summary Block on the last page
   last_page = doc[-1]
   summary_rect = fitz.Rect(
       last_page.rect.width - 250,
@@ -119,10 +125,12 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   summary_lines = ["--- GL SUMMARY ---"]
   for item in data.get("gl_summary", []):
     summary_lines.append(
-        f"{item['gl_name'][:14]} {item['gl_code']}: ${item['subtotal']:,.2f}"
+        f"{str(item['gl_name'])[:14]} {item['gl_code']}: ${float(item['subtotal']):,.2f}"
     )
   summary_lines.append("-------------------")
-  summary_lines.append(f"TOTAL: ${data.get('invoice_total', 0.0):,.2f}")
+  summary_lines.append(
+      f"TOTAL: ${float(data.get('invoice_total', 0.0)):,.2f}"
+  )
 
   last_page.insert_textbox(
       summary_rect + (8, 8, -8, -8),
@@ -139,10 +147,10 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
 
 
 # -------------------------------------------------------------
-# 3. Dynamic Model Discovery (Prevents 404 Errors)
+# 3. Dynamic Model Discovery & Fallback Mechanism
 # -------------------------------------------------------------
 def get_available_models():
-  """Discovers all valid models supporting content generation on this API key."""
+  """Discovers active vision-capable models on this API key."""
   valid_models = []
   try:
     for m in client.models.list():
@@ -152,14 +160,13 @@ def get_available_models():
   except Exception:
     pass
 
-  # Fallback priority list if list query fails
   if not valid_models:
     valid_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
   return valid_models
 
 
 def call_ai_with_dynamic_models(contents):
-  """Calls Gemini using only verified active models on the account with automatic retry on 503/429."""
+  """Calls Gemini using discovered active models with auto-retry on 503/429 errors."""
   available = get_available_models()
   last_err = None
 
@@ -181,13 +188,13 @@ def call_ai_with_dynamic_models(contents):
           time.sleep(2)
           continue
         else:
-          break  # If model is 404, immediately try next available model
+          break  # Break to next model on 404/other error
 
   raise Exception(f"All available models failed. Last error: {last_err}")
 
 
 # -------------------------------------------------------------
-# 4. Main Interface
+# 4. Main Interface & Multi-Page Engine
 # -------------------------------------------------------------
 if uploaded_file is not None:
   file_bytes = uploaded_file.getvalue()
@@ -243,11 +250,20 @@ if uploaded_file is not None:
   # --- Right Column: Processing & GL Assignment ---
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
+    st.info(f"📑 Document contains **{total_pages} total page(s)**.")
+
     if st.button("🚀 Analyze & Code Entire Invoice", type="primary"):
-      with st.spinner("Discovering active model and coding invoice..."):
-        prompt = """
+      with st.spinner(
+          f"Extracting all line items across all {total_pages} page(s)..."
+      ):
+        prompt = f"""
                 You are an expert hospitality & hotel accountant.
-                Analyze all pages of this vendor invoice. Extract header data, itemize every purchased line item with its exact SKU/code/description and cost, and aggregate category subtotals into hotel General Ledger (GL) accounts.
+                You are given a multi-page vendor invoice containing {total_pages} pages in sequential order.
+                
+                IMPORTANT INSTRUCTIONS:
+                1. You MUST examine EVERY SINGLE PAGE from Page 1 to Page {total_pages}. Do NOT stop after page 1.
+                2. Extract all line items from every page, note the page number where each item was found, and assign each to the correct hotel General Ledger (GL) account.
+                3. Sum all category subtotals from all pages combined into the gl_summary list.
 
                 Standard Hospitality Chart of Accounts Reference:
                 - 5210.1: Cleaning Supplies / Chemicals / Soap & Janitorial
@@ -269,34 +285,40 @@ if uploaded_file is not None:
                 - 6902.1: Bank Charges / Late Fees
 
                 Return ONLY valid JSON with this exact structure:
-                {
+                {{
                     "vendor": "Vendor Name",
                     "invoice_number": "Invoice Number",
                     "invoice_date": "YYYY-MM-DD",
                     "invoice_total": 0.00,
+                    "total_pages_read": {total_pages},
                     "gl_summary": [
-                        {
+                        {{
                             "gl_code": "5301.1",
                             "gl_name": "Dairy",
                             "subtotal": 0.00
-                        }
+                        }}
                     ],
                     "items": [
-                        {
+                        {{
+                            "page_number": 1,
                             "item_code": "SKU or Item Code",
                             "description": "Short Description",
                             "amount": 0.00,
                             "gl_code": "5301.1",
                             "gl_name": "Dairy"
-                        }
+                        }}
                     ]
-                }
+                }}
                 """
 
         contents = [prompt]
-        for img in images:
+        # Append each page with an explicit sequence header
+        for idx, img in enumerate(images, start=1):
+          contents.append(
+              f"--- START OF INVOICE PAGE {idx} OF {total_pages} ---"
+          )
           img_buffer = io.BytesIO()
-          img.convert("RGB").save(img_buffer, format="JPEG", quality=80)
+          img.convert("RGB").save(img_buffer, format="JPEG", quality=85)
           contents.append(
               types.Part.from_bytes(
                   data=img_buffer.getvalue(),
@@ -308,12 +330,14 @@ if uploaded_file is not None:
           parsed_data, used_model = call_ai_with_dynamic_models(contents)
           st.session_state["invoice_data"] = parsed_data
           st.toast(
-              f"Invoice analyzed successfully via {used_model}!", icon="✅"
+              f"All {total_pages} page(s) analyzed successfully via"
+              f" {used_model}!",
+              icon="✅",
           )
         except Exception as e:
           st.error(f"Generation error: {e}")
 
-    # Display results
+    # Display results if available
     if "invoice_data" in st.session_state:
       data = st.session_state["invoice_data"]
 
@@ -321,15 +345,17 @@ if uploaded_file is not None:
       m1, m2, m3 = st.columns(3)
       m1.metric("Vendor", data.get("vendor", "N/A"))
       m2.metric("Invoice #", data.get("invoice_number", "N/A"))
-      m3.metric("Total", f"${data.get('invoice_total', 0.0):,.2f}")
+      m3.metric("Total", f"${float(data.get('invoice_total', 0.0)):,.2f}")
 
-      st.markdown("#### 📊 GL Subtotal Summary")
+      st.markdown("#### 📊 GL Subtotal Summary (All Pages)")
       df_summary = pd.DataFrame(data.get("gl_summary", []))
       st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
       # Balance check
-      calc_sum = df_summary["subtotal"].sum() if not df_summary.empty else 0.0
-      inv_tot = data.get("invoice_total", 0.0)
+      calc_sum = (
+          float(df_summary["subtotal"].sum()) if not df_summary.empty else 0.0
+      )
+      inv_tot = float(data.get("invoice_total", 0.0))
       if abs(calc_sum - inv_tot) < 0.05:
         st.success(
             f"✅ Math Balanced: Subtotals match Invoice Total (${inv_tot:,.2f})"
@@ -339,6 +365,11 @@ if uploaded_file is not None:
             f"⚠️ Difference of ${abs(calc_sum - inv_tot):,.2f} detected between"
             " items and invoice total."
         )
+
+      # Show Extracted Line Items table with page numbers
+      with st.expander("🔍 View All Extracted Line Items (By Page)", expanded=False):
+        df_items = pd.DataFrame(data.get("items", []))
+        st.dataframe(df_items, use_container_width=True, hide_index=True)
 
       st.markdown("---")
       st.markdown("#### 📥 Download Processed Files")
