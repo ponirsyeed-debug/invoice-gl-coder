@@ -135,37 +135,54 @@ def stamp_gl_summary_on_pdf(pdf_bytes, data):
   return output_pdf.getvalue()
 
 
-# 4. Multi-Key Auto-Rotation Engine with Automatic Rate-Limit Cooldown
+# 4. Multi-Key Auto-Rotation Engine with Smart Quota Handling
 def execute_with_key_rotation(contents):
   last_err = None
 
   for key_idx, key in enumerate(api_keys, start=1):
     client = genai.Client(api_key=key)
 
-    for retry in range(2):
-      try:
-        response = client.models.generate_content(
-            model=ACTIVE_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
-        )
-        return json.loads(response.text), f"{ACTIVE_MODEL} (Key #{key_idx})"
-      except Exception as e:
-        last_err = e
-        err_str = str(e)
-        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-          time.sleep(2.0)
-          continue
-        elif "503" in err_str or "UNAVAILABLE" in err_str:
-          time.sleep(1.5)
-          continue
-        else:
-          break
+    try:
+      response = client.models.generate_content(
+          model=ACTIVE_MODEL,
+          contents=contents,
+          config=types.GenerateContentConfig(
+              response_mime_type="application/json",
+              temperature=0.1,
+          ),
+      )
+      return json.loads(response.text), f"{ACTIVE_MODEL} (Key #{key_idx})"
+    except Exception as e:
+      last_err = e
+      err_str = str(e)
 
-  raise Exception(f"{last_err}")
+      # If daily project quota is exhausted, immediately try the next key from the pool
+      if "GenerateRequestsPerDay" in err_str or "quotaValue': '20'" in err_str:
+        continue
+
+      # If temporary per-minute burst rate limit, short cooldown retry
+      elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+        time.sleep(2.0)
+        try:
+          response = client.models.generate_content(
+              model=ACTIVE_MODEL,
+              contents=contents,
+              config=types.GenerateContentConfig(
+                  response_mime_type="application/json",
+                  temperature=0.1,
+              ),
+          )
+          return json.loads(response.text), f"{ACTIVE_MODEL} (Key #{key_idx})"
+        except Exception as retry_e:
+          last_err = retry_e
+          continue
+      else:
+        continue
+
+  raise Exception(
+      f"All configured API keys have hit their daily free limit (20 requests/day per project). "
+      f"Please attach a billing account on AI Studio or supply a key from a separate Google account. (Details: {last_err})"
+  )
 
 
 # 5. UI Layout & Multi-Page Execution
@@ -207,7 +224,7 @@ if uploaded_file is not None:
 
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
-    st.info(f"📑 {total_pages} Page(s) ready for analysis.")
+    st.info(f"📑 {total_pages} Page(s) ready for fast analysis.")
 
     if st.button("⚡ Fast Analyze & Code", type="primary"):
       with st.spinner(f"Analyzing all {total_pages} page(s) using {ACTIVE_MODEL}..."):
