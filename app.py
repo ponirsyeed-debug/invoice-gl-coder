@@ -47,6 +47,8 @@ if not api_keys:
   st.error("⚠️ No API keys found. Please add your keys to Streamlit Secrets.")
   st.stop()
 
+ACTIVE_MODEL = "gemini-3.6-flash"
+
 uploaded_file = st.file_uploader(
     "Upload Vendor Invoice (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"]
 )
@@ -133,41 +135,35 @@ def stamp_gl_summary_on_pdf(pdf_bytes, data):
   return output_pdf.getvalue()
 
 
-# 4. Multi-Key Auto-Rotation AI Engine with Cooldown Backoff
+# 4. Multi-Key Auto-Rotation Engine with Automatic Rate-Limit Cooldown
 def execute_with_key_rotation(contents):
-  candidate_models = ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-1.5-flash"]
   last_err = None
 
   for key_idx, key in enumerate(api_keys, start=1):
     client = genai.Client(api_key=key)
 
-    for model_name in candidate_models:
-      for retry in range(2):  # Try twice per model to handle momentary rate bursts
-        try:
-          response = client.models.generate_content(
-              model=model_name,
-              contents=contents,
-              config=types.GenerateContentConfig(
-                  response_mime_type="application/json",
-                  temperature=0.1,
-              ),
-          )
-          return json.loads(response.text), f"{model_name} (Key #{key_idx})"
-        except Exception as e:
-          last_err = e
-          err_str = str(e)
-          is_429 = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-          is_503 = "503" in err_str or "UNAVAILABLE" in err_str
-
-          if is_429:
-            # Per-minute cooldown wait
-            time.sleep(2.5)
-            continue
-          elif is_503:
-            time.sleep(1.5)
-            continue
-          else:
-            break
+    for retry in range(2):
+      try:
+        response = client.models.generate_content(
+            model=ACTIVE_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        return json.loads(response.text), f"{ACTIVE_MODEL} (Key #{key_idx})"
+      except Exception as e:
+        last_err = e
+        err_str = str(e)
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+          time.sleep(2.0)
+          continue
+        elif "503" in err_str or "UNAVAILABLE" in err_str:
+          time.sleep(1.5)
+          continue
+        else:
+          break
 
   raise Exception(f"{last_err}")
 
@@ -214,7 +210,7 @@ if uploaded_file is not None:
     st.info(f"📑 {total_pages} Page(s) ready for analysis.")
 
     if st.button("⚡ Fast Analyze & Code", type="primary"):
-      with st.spinner("Analyzing invoice across all pages..."):
+      with st.spinner(f"Analyzing all {total_pages} page(s) using {ACTIVE_MODEL}..."):
         prompt = f"""
                 You are an expert hospitality accountant for HEX DEL RIO, LC[cite: 1, 2].
                 Analyze all {total_pages} page(s) of this vendor invoice. Extract every purchased line item, identify the vendor, invoice date, number, total, and categorize each line item strictly into the complete HEX DEL RIO Chart of Accounts (COA)[cite: 1, 2].
