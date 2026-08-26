@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import fitz  # PyMuPDF
 import pandas as pd
 import pypdfium2 as pdfium
@@ -20,16 +21,39 @@ st.caption(
     "multi-page vendor invoices, validates math balance, and stamps an auto-fitted GL review box."
 )
 
-# 1. API Key Setup
-api_key = st.secrets.get("GEMINI_API_KEY", None)
-if not api_key:
-  api_key = st.sidebar.text_input("Enter Gemini API Key", type="password")
+# -------------------------------------------------------------
+# 1. Multi-Key Pool Setup (Loaded from Secrets)
+# -------------------------------------------------------------
+def load_api_key_pool():
+  """Collects all configured Gemini API keys from Streamlit secrets."""
+  keys = []
 
-if not api_key:
-  st.warning("Please configure your GEMINI_API_KEY to continue.")
+  # Check for comma-separated single secret
+  raw_keys = st.secrets.get("GEMINI_API_KEYS", "")
+  if raw_keys:
+    keys.extend([k.strip() for k in raw_keys.split(",") if k.strip()])
+
+  # Check standard keys
+  if st.secrets.get("GEMINI_API_KEY"):
+    keys.append(st.secrets["GEMINI_API_KEY"].strip())
+
+  # Check numbered keys (GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.)
+  for i in range(1, 15):
+    k = st.secrets.get(f"GEMINI_API_KEY_{i}")
+    if k and k.strip() not in keys:
+      keys.append(k.strip())
+
+  # Remove duplicates while preserving order
+  unique_keys = list(dict.fromkeys(keys))
+  return unique_keys
+
+
+api_keys = load_api_key_pool()
+
+if not api_keys:
+  st.error("⚠️ No API keys found. Please add your keys to Streamlit Secrets.")
   st.stop()
 
-client = genai.Client(api_key=api_key)
 ACTIVE_MODEL = "gemini-3.6-flash"
 
 uploaded_file = st.file_uploader(
@@ -65,7 +89,6 @@ def stamp_gl_summary_on_pdf(pdf_bytes, data):
   w = last_page.rect.width
   h = last_page.rect.height
 
-  # Build the summary lines
   summary_lines = ["--- REVIEWED & CODED ---"]
   for item in data.get("gl_summary", []):
     summary_lines.append(
@@ -74,7 +97,6 @@ def stamp_gl_summary_on_pdf(pdf_bytes, data):
   summary_lines.append("------------------------")
   summary_lines.append(f"TOTAL: ${float(data.get('invoice_total', 0.0)):,.2f}")
 
-  # Dynamic auto-fitting dimensions
   line_count = len(summary_lines)
   font_size = 8
   line_height = 11.5
@@ -120,7 +142,46 @@ def stamp_gl_summary_on_pdf(pdf_bytes, data):
   return output_pdf.getvalue()
 
 
-# 4. UI Layout & Multi-Page Execution
+# 4. Multi-Key Auto-Rotation AI Engine
+def execute_with_key_rotation(contents):
+  """Loops through available API keys and models automatically when 429 quota occurs."""
+  candidate_models = ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-1.5-flash"]
+  last_err = None
+
+  for key_idx, key in enumerate(api_keys, start=1):
+    client = genai.Client(api_key=key)
+
+    for model_name in candidate_models:
+      try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        return json.loads(response.text), f"{model_name} (Key #{key_idx})"
+      except Exception as e:
+        last_err = e
+        err_msg = str(e)
+        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+          # Break to the next API key in the pool
+          break
+        elif "503" in err_msg or "UNAVAILABLE" in err_msg:
+          time.sleep(1)
+          continue  # Try next model under same key
+        elif "404" in err_msg:
+          continue
+        else:
+          break
+
+  raise Exception(
+      f"All API keys in the pool have exhausted their quota. Please add more keys. Last error: {last_err}"
+  )
+
+
+# 5. UI Layout & Multi-Page Execution
 if uploaded_file is not None:
   file_bytes = uploaded_file.getvalue()
   is_pdf = uploaded_file.name.lower().endswith(".pdf")
@@ -159,105 +220,103 @@ if uploaded_file is not None:
 
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
-    st.info(f"📑 {total_pages} Page(s) ready for fast analysis.")
+    st.info(f"📑 {total_pages} Page(s) ready for analysis.")
 
     if st.button("⚡ Fast Analyze & Code", type="primary"):
-      with st.spinner(
-          f"Analyzing all {total_pages} page(s) using {ACTIVE_MODEL}..."
-      ):
+      with st.spinner("Analyzing invoice across all pages..."):
         prompt = f"""
-                You are an expert hospitality accountant for HEX DEL RIO, LC.
-                Analyze all {total_pages} page(s) of this vendor invoice. Extract every purchased line item, identify the vendor, invoice date, number, total, and categorize each line item strictly into the complete HEX DEL RIO Chart of Accounts (COA).
+                You are an expert hospitality accountant for HEX DEL RIO, LC[cite: 1, 2].
+                Analyze all {total_pages} page(s) of this vendor invoice. Extract every purchased line item, identify the vendor, invoice date, number, total, and categorize each line item strictly into the complete HEX DEL RIO Chart of Accounts (COA)[cite: 1, 2].
 
                 ============================================================
                 COMPLETE HEX DEL RIO, LC CHART OF ACCOUNTS REFERENCE:
                 ============================================================
                 --- 1. FOOD & BEVERAGE COGS (5300 series) ---
-                - 5301.1: Dairy (Milk, Butter, Cheese, Yogurt, Creamer, Eggs)
-                - 5301.2: Protein, Meats etc. (Bacon, Sausage, Ham, Poultry, Patties)
-                - 5301.3: Paper & Utensils (Plates, Cups, Cutlery, Straws, Napkins, Bags, Foil, Trash Liners)
-                - 5301.4: Cereal, Breads, and Carbs (Bread, Bagels, Muffins, Waffle mix, Cereal, Pastries, Tortillas)
-                - 5301.5: Cinnamon Rolls
-                - 5301.6: Fruit & Produce (Fresh apples, Bananas, Melons, Potatoes, Veggies, Garnish)
-                - 5301.7: Condiments (Salsa, Jelly, Syrup, Butter cups, Ketchup, Mustard, Mayo, Spices, Dressings)
-                - 5302: Beverage (Juices, Beverage dispenser concentrate, Soda syrup, Tea bags, Cocoa)
-                - 5302.1: Coffee (Brewed coffee packs, Coffee beans)
-                - 5302.2: Cups, Stirs & paper goods
-                - 5302.3: Coffee Creamer
-                - 5302.4: Juice
-                - 5302.5: Cocoa
-                - 5302.6: Water
-                - 5302.7: Tea
-                - 5303: Food & Bev Sales Tax (Sales tax on distributor food/beverage invoices)
-                - 5303.1: Gas charged for delivery (Fuel surcharges, Delivery surcharges)
+                - 5301.1: Dairy (Milk, Butter, Cheese, Yogurt, Creamer, Eggs)[cite: 1, 2]
+                - 5301.2: Protein, Meats etc. (Bacon, Sausage, Ham, Poultry, Patties)[cite: 1, 2]
+                - 5301.3: Paper & Utensils (Plates, Cups, Cutlery, Straws, Napkins, Bags, Foil, Trash Liners)[cite: 1, 2]
+                - 5301.4: Cereal, Breads, and Carbs (Bread, Bagels, Muffins, Waffle mix, Cereal, Pastries, Tortillas)[cite: 1, 2]
+                - 5301.5: Cinnamon Rolls[cite: 1, 2]
+                - 5301.6: Fruit & Produce (Fresh apples, Bananas, Melons, Potatoes, Veggies, Garnish)[cite: 1, 2]
+                - 5301.7: Condiments (Salsa, Jelly, Syrup, Butter cups, Ketchup, Mustard, Mayo, Spices, Dressings)[cite: 1, 2]
+                - 5302: Beverage (Juices, Beverage dispenser concentrate, Soda syrup, Tea bags, Cocoa)[cite: 1, 2]
+                - 5302.1: Coffee (Brewed coffee packs, Coffee beans)[cite: 1, 2]
+                - 5302.2: Cups, Stirs & paper goods[cite: 1, 2]
+                - 5302.3: Coffee Creamer[cite: 1, 2]
+                - 5302.4: Juice[cite: 1, 2]
+                - 5302.5: Cocoa[cite: 1, 2]
+                - 5302.6: Water[cite: 1, 2]
+                - 5302.7: Tea[cite: 1, 2]
+                - 5303: Food & Bev Sales Tax (Sales tax on distributor food/beverage invoices)[cite: 1, 2]
+                - 5303.1: Gas charged for delivery (Fuel surcharges, Delivery surcharges)[cite: 1, 2]
 
                 --- 2. ROOMS, HOUSEKEEPING & LAUNDRY (5200 series) ---
-                - 5210.1: Cleaning Supplies (Bleach, floor cleaner, degreaser, disinfectants, janitorial supplies)
-                - 5210.2: Guest Room - Material (Shampoo, body wash, bar soap, conditioner, lotions, room amenities)
-                - 5210.3: Operating supplies (Housekeeping caddies, spray bottles, smallware)
-                - 5210.4: Guest Room Supplies Sales Tax
-                - 5250.1: Chemicals/Soap & Supply (Laundry detergents, fabric softeners, laundry bleach)
-                - 5250.2: Laundry Equip Repair & Replace
-                - 5250.3: Linen Replacement (Bed sheets, Pillowcases, Duvet covers, Towels, Mattress pads, Blankets)
+                - 5210.1: Cleaning Supplies (Bleach, floor cleaner, degreaser, disinfectants, janitorial supplies)[cite: 1, 2]
+                - 5210.2: Guest Room - Material (Shampoo, body wash, bar soap, conditioner, lotions, room amenities)[cite: 1, 2]
+                - 5210.3: Operating supplies (Housekeeping caddies, spray bottles, smallware)[cite: 1, 2]
+                - 5210.4: Guest Room Supplies Sales Tax[cite: 1, 2]
+                - 5250.1: Chemicals/Soap & Supply (Laundry detergents, fabric softeners, laundry bleach)[cite: 1, 2]
+                - 5250.2: Laundry Equip Repair & Replace[cite: 1, 2]
+                - 5250.3: Linen Replacement (Bed sheets, Pillowcases, Duvet covers, Towels, Mattress pads, Blankets)[cite: 1, 2]
 
                 --- 3. PROPERTY OPERATIONS, MAINTENANCE & UTILITIES (6700 - 6800 series) ---
-                - 6701.1: Swimming Pool (Pool chemicals, chlorine, pool maintenance)
-                - 6701.2: Elevators (Elevator maintenance contracts / inspections)
-                - 6701.3: Grounds & Landscape (Landscaping, lawn mowing, tree trimming)
-                - 6701.4: Waste Removal (Dumpster, trash pickup, recycling, waste services)
-                - 6701.5: Pest Control (Exterminator services)
-                - 6701.6: Fire System Test & Monitor (Fire extinguisher inspections, alarm monitoring)
-                - 6701.7: Equipment Rental
-                - 6701.8: Music Service
-                - 6701.9: Patrol Security
-                - 6702.1: Contracted Repairs (Dryer repair, appliance repair, contractor repairs)
-                - 6702.2: Furniture Repair
-                - 6702.3: Painting/Decorating
-                - 6702.4: Kitchen Equipment
-                - 6702.5: Curtains & Drapes
-                - 6702.6: Plumbing & HVAC supplies
-                - 6702.7: Water Softener Supply & Repair
-                - 6702.8: Building
-                - 6702.9: Light Bulbs
-                - 6703: Operating Supplies - Maint (Hardware, paint, filters, tools)
-                - 6704: Van Gas, Oil & Repairs (Hotel shuttle gas, oil changes, shuttle maintenance)
-                - 6750: Cable TV (Spectrum, DirecTV, Comcast cable bills)
-                - 6801: Electricity (Electric utility bills)
-                - 6802: Gas (Natural gas / Propane utility bills)
-                - 6803: Water & Sewer utility (6803.1 House / 6803.2 Landscape / 6803.3 Sewer)
+                - 6701.1: Swimming Pool (Pool chemicals, chlorine, pool maintenance)[cite: 1, 2]
+                - 6701.2: Elevators (Elevator maintenance contracts / inspections)[cite: 1, 2]
+                - 6701.3: Grounds & Landscape (Landscaping, lawn mowing, tree trimming)[cite: 1, 2]
+                - 6701.4: Waste Removal (Dumpster, trash pickup, recycling, waste services)[cite: 1, 2]
+                - 6701.5: Pest Control (Exterminator services)[cite: 1, 2]
+                - 6701.6: Fire System Test & Monitor (Fire extinguisher inspections, alarm monitoring)[cite: 1, 2]
+                - 6701.7: Equipment Rental[cite: 1, 2]
+                - 6701.8: Music Service[cite: 1, 2]
+                - 6701.9: Patrol Security[cite: 1, 2]
+                - 6702.1: Contracted Repairs (Dryer repair, appliance repair, contractor repairs)[cite: 1, 2]
+                - 6702.2: Furniture Repair[cite: 1, 2]
+                - 6702.3: Painting/Decorating[cite: 1, 2]
+                - 6702.4: Kitchen Equipment[cite: 1, 2]
+                - 6702.5: Curtains & Drapes[cite: 1, 2]
+                - 6702.6: Plumbing & HVAC supplies[cite: 1, 2]
+                - 6702.7: Water Softener Supply & Repair[cite: 1, 2]
+                - 6702.8: Building[cite: 1, 2]
+                - 6702.9: Light Bulbs[cite: 1, 2]
+                - 6703: Operating Supplies - Maint (Hardware, paint, filters, tools)[cite: 1, 2]
+                - 6704: Van Gas, Oil & Repairs (Hotel shuttle gas, oil changes, shuttle maintenance)[cite: 1, 2]
+                - 6750: Cable TV (Spectrum, DirecTV, Comcast cable bills)[cite: 1, 2]
+                - 6801: Electricity (Electric utility bills)[cite: 1, 2]
+                - 6802: Gas (Natural gas / Propane utility bills)[cite: 1, 2]
+                - 6803: Water & Sewer utility (6803.1 House / 6803.2 Landscape / 6803.3 Sewer)[cite: 1, 2]
 
                 --- 4. ADMIN, IT, SOFTWARE & GENERAL (6000 - 6050 series) ---
-                - 6040.6: First Aid Kit (Cintas/First aid cabinet refills, employee safety supplies)
-                - 6043: Postage/Fed Ex/Delivery (USPS, FedEx, UPS shipping)
-                - 6044: Paper, Ink & Oper Supplies (Office paper, toner, printer cartridges, pens, keycards)
-                - 6045.1: Equipment Repair & Replace (Office copiers, front desk printers)
-                - 6045.2: Equipment Maintenance - Opera (Opera PMS support, hotel software maintenance)
-                - 6045.3: Cellular Telephone (Staff mobile phones)
-                - 6045.4: HP Computers (Hewlett Packard Financial Services, IT hardware leasing, server rentals)
-                - 6045.5: Intuit Quickbooks Fees (Quickbooks subscriptions, accounting software fees)
-                - 6050.1: Credit Card Commission (Merchant processing fees, interchange fees)
-                - 6050.2: CLC Fees (Corporate Lodging Card fees)
-                - 6050.3: CC Charge Backs/Write Downs
+                - 6040.6: First Aid Kit (Cintas/First aid cabinet refills, employee safety supplies)[cite: 1, 2]
+                - 6043: Postage/Fed Ex/Delivery (USPS, FedEx, UPS shipping)[cite: 1, 2]
+                - 6044: Paper, Ink & Oper Supplies (Office paper, toner, printer cartridges, pens, keycards)[cite: 1, 2]
+                - 6045.1: Equipment Repair & Replace (Office copiers, front desk printers)[cite: 1, 2]
+                - 6045.2: Equipment Maintenance - Opera (Opera PMS support, hotel software maintenance)[cite: 1, 2]
+                - 6045.3: Cellular Telephone (Staff mobile phones)[cite: 1, 2]
+                - 6045.4: HP Computers (Hewlett Packard Financial Services, IT hardware leasing, server rentals)[cite: 1, 2]
+                - 6045.5: Intuit Quickbooks Fees (Quickbooks subscriptions, accounting software fees)[cite: 1, 2]
+                - 6050.1: Credit Card Commission (Merchant processing fees, interchange fees)[cite: 1, 2]
+                - 6050.2: CLC Fees (Corporate Lodging Card fees)[cite: 1, 2]
+                - 6050.3: CC Charge Backs/Write Downs[cite: 1, 2]
 
                 --- 5. SALES, MARKETING, FRANCHISE & TAXES (6100 - 8000 series) ---
-                - 6152: Dues/Subscriptions (Chamber of Commerce, hotel associations)
-                - 6175.1: Outdoor Advertising (Billboards)
-                - 6175.5: Print Media / Advertising
-                - 6178: Weekly Guest Reception (Social hour food & beverage)
-                - 6180: Travel Agent Fees & Commissions (Expedia, Booking.com commission fees)
-                - 6601.1: Franchise Royalty Fee
-                - 6601.2: Franchise Sales Fee
-                - 6601.3: Brand Reservation Charges
-                - 6601.4: Brand Training
-                - 6602: Frequent Guest Plan (IHG Rewards, loyalty point fees)
-                - 6902.1: Bank Charges (Returned check fees, wire fees, bank service charges)
-                - 7000: Property Tax (County & City property tax bills)
-                - 7002: License Permits & Fees (Health department permit, city operating licenses, elevator permits)
-                - 7101: Property & Casualty (Property insurance premiums)
-                - 7102: Liability (General liability insurance)
-                - 7104: Worker's Compensation
-                - 8001: Legal Fees (Attorney / legal services)
-                - 8002: Audit, CPA, Tax Return Preparations (CPA tax preparation, accounting audit fees)
+                - 6152: Dues/Subscriptions (Chamber of Commerce, hotel associations)[cite: 1, 2]
+                - 6175.1: Outdoor Advertising (Billboards)[cite: 1, 2]
+                - 6175.5: Print Media / Advertising[cite: 1, 2]
+                - 6178: Weekly Guest Reception (Social hour food & beverage)[cite: 1, 2]
+                - 6180: Travel Agent Fees & Commissions (Expedia, Booking.com commission fees)[cite: 1, 2]
+                - 6601.1: Franchise Royalty Fee[cite: 1, 2]
+                - 6601.2: Franchise Sales Fee[cite: 1, 2]
+                - 6601.3: Brand Reservation Charges[cite: 1, 2]
+                - 6601.4: Brand Training[cite: 1, 2]
+                - 6602: Frequent Guest Plan (IHG Rewards, loyalty point fees)[cite: 1, 2]
+                - 6902.1: Bank Charges (Returned check fees, wire fees, bank service charges)[cite: 1, 2]
+                - 7000: Property Tax (County & City property tax bills)[cite: 1, 2]
+                - 7002: License Permits & Fees (Health department permit, city operating licenses, elevator permits)[cite: 1, 2]
+                - 7101: Property & Casualty (Property insurance premiums)[cite: 1, 2]
+                - 7102: Liability (General liability insurance)[cite: 1, 2]
+                - 7104: Worker's Compensation[cite: 1, 2]
+                - 8001: Legal Fees (Attorney / legal services)[cite: 1, 2]
+                - 8002: Audit, CPA, Tax Return Preparations (CPA tax preparation, accounting audit fees)[cite: 1, 2]
 
                 Return strictly valid JSON matching this exact structure:
                 {{
@@ -297,18 +356,11 @@ if uploaded_file is not None:
           )
 
         try:
-          response = client.models.generate_content(
-              model=ACTIVE_MODEL,
-              contents=contents,
-              config=types.GenerateContentConfig(
-                  response_mime_type="application/json",
-                  temperature=0.1,
-              ),
-          )
-          st.session_state["invoice_data"] = json.loads(response.text)
-          st.toast(f"⚡ Completed via {ACTIVE_MODEL}!", icon="🚀")
+          parsed_data, used_channel = execute_with_key_rotation(contents)
+          st.session_state["invoice_data"] = parsed_data
+          st.toast(f"⚡ Successfully coded via {used_channel}!", icon="🚀")
         except Exception as e:
-          st.error(f"API Error ({ACTIVE_MODEL}): {e}")
+          st.error(f"Processing Error: {e}")
 
     if "invoice_data" in st.session_state:
       data = st.session_state["invoice_data"]
