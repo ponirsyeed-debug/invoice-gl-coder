@@ -29,24 +29,26 @@ if not api_key:
 client = genai.Client(api_key=api_key)
 
 
-# Auto-detect available fast models on this key
+# Auto-detect available active models
 @st.cache_data(ttl=3600)
 def fetch_active_models(_client_ref):
   active = []
   try:
     for m in _client_ref.models.list():
       name = m.name.replace("models/", "")
-      if "flash" in name:
+      if "3.6" in name or "3" in name:
         active.append(name)
   except Exception:
     pass
   if not active:
-    active = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    active = ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-3-flash"]
   return active
 
 
 detected_models = fetch_active_models(client)
-selected_model = st.sidebar.selectbox("Active AI Model", detected_models, index=0)
+selected_model = st.sidebar.selectbox(
+    "Active AI Model", detected_models, index=0
+)
 
 uploaded_file = st.file_uploader(
     "Upload Vendor Invoice (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"]
@@ -66,7 +68,6 @@ def get_pdf_images_fast(pdf_bytes):
   images = []
   pdf = pdfium.PdfDocument(pdf_bytes)
   for page in pdf:
-    # scale=1.2 is 3x faster than 2.0 and keeps crisp text for OCR
     image = page.render(scale=1.2).to_pil()
     images.append(image)
   return images
@@ -191,10 +192,12 @@ if uploaded_file is not None:
 
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
-    st.info(f"📑 {total_pages} Page(s) ready for fast analysis.")
+    st.info(f"📑 {total_pages} Page(s) ready for analysis.")
 
     if st.button("⚡ Fast Analyze & Code", type="primary"):
-      with st.spinner(f"Analyzing all {total_pages} page(s)..."):
+      with st.spinner(
+          f"Analyzing all {total_pages} page(s) using {selected_model}..."
+      ):
         prompt = f"""
                 Analyze all {total_pages} page(s) of this hotel invoice. Extract totals and categorize into GL accounts:
                 - 5210.1: Cleaning/Chemicals/Janitorial
