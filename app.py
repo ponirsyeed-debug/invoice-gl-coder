@@ -25,27 +25,20 @@ st.caption(
 # 1. Multi-Key Pool Setup (Loaded from Secrets)
 # -------------------------------------------------------------
 def load_api_key_pool():
-  """Collects all configured Gemini API keys from Streamlit secrets."""
   keys = []
-
-  # Check for comma-separated single secret
   raw_keys = st.secrets.get("GEMINI_API_KEYS", "")
   if raw_keys:
     keys.extend([k.strip() for k in raw_keys.split(",") if k.strip()])
 
-  # Check standard keys
   if st.secrets.get("GEMINI_API_KEY"):
     keys.append(st.secrets["GEMINI_API_KEY"].strip())
 
-  # Check numbered keys (GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.)
   for i in range(1, 15):
     k = st.secrets.get(f"GEMINI_API_KEY_{i}")
     if k and k.strip() not in keys:
       keys.append(k.strip())
 
-  # Remove duplicates while preserving order
-  unique_keys = list(dict.fromkeys(keys))
-  return unique_keys
+  return list(dict.fromkeys(keys))
 
 
 api_keys = load_api_key_pool()
@@ -53,8 +46,6 @@ api_keys = load_api_key_pool()
 if not api_keys:
   st.error("⚠️ No API keys found. Please add your keys to Streamlit Secrets.")
   st.stop()
-
-ACTIVE_MODEL = "gemini-3.6-flash"
 
 uploaded_file = st.file_uploader(
     "Upload Vendor Invoice (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"]
@@ -142,9 +133,8 @@ def stamp_gl_summary_on_pdf(pdf_bytes, data):
   return output_pdf.getvalue()
 
 
-# 4. Multi-Key Auto-Rotation AI Engine
+# 4. Multi-Key Auto-Rotation AI Engine with Cooldown Backoff
 def execute_with_key_rotation(contents):
-  """Loops through available API keys and models automatically when 429 quota occurs."""
   candidate_models = ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-1.5-flash"]
   last_err = None
 
@@ -152,33 +142,34 @@ def execute_with_key_rotation(contents):
     client = genai.Client(api_key=key)
 
     for model_name in candidate_models:
-      try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
-        )
-        return json.loads(response.text), f"{model_name} (Key #{key_idx})"
-      except Exception as e:
-        last_err = e
-        err_msg = str(e)
-        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-          # Break to the next API key in the pool
-          break
-        elif "503" in err_msg or "UNAVAILABLE" in err_msg:
-          time.sleep(1)
-          continue  # Try next model under same key
-        elif "404" in err_msg:
-          continue
-        else:
-          break
+      for retry in range(2):  # Try twice per model to handle momentary rate bursts
+        try:
+          response = client.models.generate_content(
+              model=model_name,
+              contents=contents,
+              config=types.GenerateContentConfig(
+                  response_mime_type="application/json",
+                  temperature=0.1,
+              ),
+          )
+          return json.loads(response.text), f"{model_name} (Key #{key_idx})"
+        except Exception as e:
+          last_err = e
+          err_str = str(e)
+          is_429 = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+          is_503 = "503" in err_str or "UNAVAILABLE" in err_str
 
-  raise Exception(
-      f"All API keys in the pool have exhausted their quota. Please add more keys. Last error: {last_err}"
-  )
+          if is_429:
+            # Per-minute cooldown wait
+            time.sleep(2.5)
+            continue
+          elif is_503:
+            time.sleep(1.5)
+            continue
+          else:
+            break
+
+  raise Exception(f"{last_err}")
 
 
 # 5. UI Layout & Multi-Page Execution
