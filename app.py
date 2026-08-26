@@ -16,8 +16,9 @@ st.set_page_config(
 
 st.title("⚡ Fast Invoice GL Coder & Annotated PDF Generator")
 st.caption(
-    "Powered by HEX DEL RIO, LC Chart of Accounts (QuickBooks COA). Auto-extracts"
-    " multi-page invoices, validates math, and stamps annotated GL codes."
+    "Powered by HEX DEL RIO, LC Chart of Accounts. Automatically extracts"
+    " multi-page invoices, validates math, and draws handwritten-style red pen"
+    " markup annotations directly on the PDF."
 )
 
 # 1. API Key Setup
@@ -31,7 +32,6 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# Fixed Active Model Endpoint
 ACTIVE_MODEL = "gemini-3.6-flash"
 
 uploaded_file = st.file_uploader(
@@ -47,7 +47,7 @@ if uploaded_file is not None:
     st.session_state["pdf_page_num"] = 0
 
 
-# 2. Optimized Image Converter (Fast scale & quality)
+# 2. Optimized Image Converter
 def get_pdf_images_fast(pdf_bytes):
   images = []
   pdf = pdfium.PdfDocument(pdf_bytes)
@@ -57,68 +57,72 @@ def get_pdf_images_fast(pdf_bytes):
   return images
 
 
-# 3. PDF Annotation with Red Markup Arrows & GL Summary Box
+# 3. True Red Pen Markup Annotation Stamper
 def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
   red_color = (0.8, 0.05, 0.05)
 
+  # Draw handwritten-style red pen markup annotations next to line items
   for page in doc:
     for item in data.get("items", []):
       search_term = str(item.get("item_code", "")).strip()
       if not search_term or len(search_term) < 3:
-        search_term = str(item.get("description", ""))[:12].strip()
+        search_term = str(item.get("description", ""))[:10].strip()
 
       if not search_term:
         continue
 
       rects = page.search_for(search_term)
       for rect in rects[:1]:
-        arrow_start = fitz.Point(rect.x1 + 6, rect.y0 + (rect.height / 2))
-        arrow_end = fitz.Point(rect.x1 + 24, rect.y0 + (rect.height / 2))
-
-        page.draw_line(arrow_start, arrow_end, color=red_color, width=1.2)
-        page.draw_line(
-            fitz.Point(arrow_end.x - 3, arrow_end.y - 2),
-            arrow_end,
-            color=red_color,
-            width=1.2,
+        # Create a slightly curved/handwritten style polyline arrow
+        start_point = fitz.Point(rect.x1 + 4, rect.y0 + (rect.height / 2))
+        mid_point = fitz.Point(
+            rect.x1 + 22, rect.y0 + (rect.height / 2) - 2
         )
-        page.draw_line(
-            fitz.Point(arrow_end.x - 3, arrow_end.y + 2),
-            arrow_end,
+        end_point = fitz.Point(rect.x1 + 38, rect.y0 + (rect.height / 2))
+
+        # Draw red pen stroke polyline
+        page.draw_polyline(
+            [start_point, mid_point, end_point],
             color=red_color,
-            width=1.2,
+            width=1.3,
         )
 
-        annotation_text = (
-            f"{item.get('gl_code', '')} ({str(item.get('gl_name', ''))[:6]})"
-        )
+        # Draw arrowhead wings
+        p1 = fitz.Point(end_point.x - 5, end_point.y - 3)
+        p2 = fitz.Point(end_point.x - 5, end_point.y + 3)
+        page.draw_line(p1, end_point, color=red_color, width=1.3)
+        page.draw_line(p2, end_point, color=red_color, width=1.3)
+
+        # Write corrected GL code in red pen style
+        annotation_text = f"{item.get('gl_code', '')} ({str(item.get('gl_name', ''))[:8]})"
         page.insert_text(
-            fitz.Point(arrow_end.x + 4, arrow_end.y + 3),
+            fitz.Point(end_point.x + 5, end_point.y + 3),
             annotation_text,
-            fontsize=7,
-            fontname="helv",
+            fontsize=7.5,
+            fontname="Courier-Bold",
             color=red_color,
         )
 
+  # Draw handwritten review box for GL Summary on the last page
   last_page = doc[-1]
   summary_rect = fitz.Rect(
-      last_page.rect.width - 240,
-      last_page.rect.height - 280,
+      last_page.rect.width - 245,
+      last_page.rect.height - 290,
       last_page.rect.width - 15,
       last_page.rect.height - 20,
   )
 
   last_page.draw_rect(
-      summary_rect, color=red_color, fill=(1, 0.96, 0.96), width=1.5
+      summary_rect, color=red_color, fill=(1, 0.96, 0.96), width=1.3
   )
 
-  summary_lines = ["--- GL SUMMARY ---"]
+  summary_lines = ["--- REVIEWED & CODED ---"]
   for item in data.get("gl_summary", []):
     summary_lines.append(
         f"{str(item['gl_name'])[:12]} {item['gl_code']}: ${float(item['subtotal']):,.2f}"
     )
-  summary_lines.append("-------------------")
+  summary_lines.append("------------------------")
   summary_lines.append(
       f"TOTAL: ${float(data.get('invoice_total', 0.0)):,.2f}"
   )
@@ -127,7 +131,7 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
       summary_rect + (6, 6, -6, -6),
       "\n".join(summary_lines),
       fontsize=8,
-      fontname="helv",
+      fontname="Courier-Bold",
       color=red_color,
   )
 
