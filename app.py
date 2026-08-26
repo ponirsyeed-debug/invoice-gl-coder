@@ -1,6 +1,5 @@
 import io
 import json
-import time
 import fitz  # PyMuPDF
 import pandas as pd
 import pypdfium2 as pdfium
@@ -16,6 +15,10 @@ st.set_page_config(
 )
 
 st.title("⚡ Fast Invoice GL Coder & Annotated PDF Generator")
+st.caption(
+    "Powered by HEX DEL RIO, LC Chart of Accounts (QuickBooks COA). Auto-extracts"
+    " multi-page invoices, validates math, and stamps annotated GL codes."
+)
 
 # 1. API Key Setup
 api_key = st.secrets.get("GEMINI_API_KEY", None)
@@ -36,7 +39,7 @@ def fetch_active_models(_client_ref):
   try:
     for m in _client_ref.models.list():
       name = m.name.replace("models/", "")
-      if "3.6" in name or "3" in name:
+      if "3.6" in name or "3" in name or "flash" in name:
         active.append(name)
   except Exception:
     pass
@@ -73,7 +76,7 @@ def get_pdf_images_fast(pdf_bytes):
   return images
 
 
-# 3. Fast PDF Stamper
+# 3. PDF Annotation with Red Markup Arrows & GL Summary Box
 def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
   red_color = (0.8, 0.05, 0.05)
@@ -153,7 +156,7 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   return output_pdf.getvalue()
 
 
-# 4. UI Layout
+# 4. UI Layout & Multi-Page AI Engine
 if uploaded_file is not None:
   file_bytes = uploaded_file.getvalue()
   is_pdf = uploaded_file.name.lower().endswith(".pdf")
@@ -192,39 +195,87 @@ if uploaded_file is not None:
 
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
-    st.info(f"📑 {total_pages} Page(s) ready for analysis.")
+    st.info(f"📑 {total_pages} Page(s) ready for fast analysis.")
 
     if st.button("⚡ Fast Analyze & Code", type="primary"):
       with st.spinner(
           f"Analyzing all {total_pages} page(s) using {selected_model}..."
       ):
         prompt = f"""
-                Analyze all {total_pages} page(s) of this hotel invoice. Extract totals and categorize into GL accounts:
-                - 5210.1: Cleaning/Chemicals/Janitorial
-                - 5210.2: Guest Room Supplies/Amenities
-                - 5210.4: Guest Room Supplies Tax
-                - 5250.1: Laundry Chemicals
-                - 5250.3: Linen Replacement (Towels, Bedding)
-                - 5301.1: Food - Dairy
-                - 5301.2: Food - Protein/Meat/Eggs
-                - 5301.3: Food - Paper & Utensils
-                - 5301.4: Food - Bread/Cereal/Bakery
-                - 5301.5: Food - Produce/Fruit
-                - 5301.6: Food - Coffee/Condiments/Syrups
-                - 5302: Beverages/Juice
-                - 6801: Electricity/Utilities
-                - 6701.4: Waste Removal
-                - 6701.5: Pest Control
-                - 6902.1: Bank Charges
+                You are an expert hospitality & hotel accountant for HEX DEL RIO, LC.
+                Analyze all {total_pages} page(s) of this vendor invoice. Extract every purchased line item, identify the vendor, invoice date, number, total, and categorize each line item strictly into the official HEX DEL RIO Chart of Accounts (COA).
 
-                Return strictly JSON:
+                Official HEX DEL RIO Chart of Accounts Reference (DRTTX COA):
+                --- FOOD & BEVERAGE COGS (5300 series) ---
+                - 5301.1: Dairy (Milk, Butter, Cheese, Yogurt, Creamer, Eggs)
+                - 5301.2: Protein, Meats etc. (Bacon, Sausage, Ham, Poultry, Patties)
+                - 5301.3: Paper & Utensils (Plates, Cups, Cutlery, Straws, Napkins, Bags, Foil, Trash Liners)
+                - 5301.4: Cereal, Breads, and Carbs (Bread, Bagels, Muffins, Waffle mix, Cereal, Pastries, Tortillas)
+                - 5301.5: Cinnamon Rolls
+                - 5301.6: Fruit & Produce (Fresh apples, Bananas, Melons, Potatoes, Veggies, Garnish)
+                - 5301.7: Condiments (Salsa, Jelly, Syrup, Butter cups, Ketchup, Mustard, Mayo, Spices, Dressings)
+                - 5302: Beverage (Dispenser juices, Soda syrup, Tea bags, Cocoa)
+                - 5302.1: Coffee (Brewed coffee packs, Coffee beans)
+                - 5303: Food & Bev Sales Tax (Sales tax on food/beverage distributor invoices)
+                - 5303.1: Gas charged for delivery (Fuel surcharges)
+
+                --- ROOMS, HOUSEKEEPING & LAUNDRY (5200 series) ---
+                - 5210.1: Cleaning Supplies (Bleach, floor cleaner, degreaser, disinfectants, janitorial)
+                - 5210.2: Guest Room - Material (Shampoo, body wash, soap, conditioner, lotions, amenities)
+                - 5210.3: Operating supplies (Housekeeping caddies, spray bottles, smallware)
+                - 5210.4: Guest Room Supplies Sales Tax (Tax on guest supplies/amenities)
+                - 5250.1: Chemicals/Soap & Supply (Laundry detergents, fabric softeners, bleach for laundry)
+                - 5250.2: Laundry Equip Repair & Replace
+                - 5250.3: Linen Replacement (Bed sheets, Pillowcases, Duvet covers, Towels, Mattress pads, Blankets)
+
+                --- PROPERTY OPERATIONS, UTILITIES & MAINTENANCE (6700 - 6800 series) ---
+                - 6701.1: Swimming Pool (Pool chemicals, chlorine, pool maintenance)
+                - 6701.2: Elevators (Elevator contract service / maintenance)
+                - 6701.3: Grounds & Landscape (Landscaping, lawn maintenance)
+                - 6701.4: Waste Removal (Dumpster, trash pickup, waste services)
+                - 6701.5: Pest Control (Exterminator, pest services)
+                - 6701.6: Fire System Test & Monitor
+                - 6702.1: Contracted Repairs (Dryer repair, HVAC repair, electrical contract work)
+                - 6702.6: Plumbing & HVAC supplies
+                - 6702.9: Light Bulbs
+                - 6703: Operating Supplies - Maint (Hardware, paint, filters, tools)
+                - 6750: Cable TV
+                - 6801: Electricity (Electric utility bills)
+                - 6802: Gas (Natural gas utility bills)
+                - 6803: Water & Sewer utility
+
+                --- ADMIN, MARKETING & FRANCHISE (6000 - 6600 series) ---
+                - 6044: Paper, Ink & Oper Supplies (Front desk office paper, toner, printer ink)
+                - 6178: Weekly Guest Reception / Social Hour food & beverage
+                - 6180: Travel Agent Fees & Commissions
+                - 6601.1: Franchise Royalty Fee
+                - 6601.3: Brand Reservation Charges
+                - 6602: Frequent Guest Plan (IHG Rewards / Member stay fees)
+                - 6902.1: Bank Charges (Returned payment fees, service fees)
+
+                Return strictly JSON matching this structure:
                 {{
                     "vendor": "Vendor Name",
                     "invoice_number": "Invoice Number",
                     "invoice_date": "YYYY-MM-DD",
                     "invoice_total": 0.00,
-                    "gl_summary": [{{"gl_code": "5301.1", "gl_name": "Dairy", "subtotal": 0.00}}],
-                    "items": [{{"page_number": 1, "item_code": "SKU", "description": "Desc", "amount": 0.00, "gl_code": "5301.1", "gl_name": "Dairy"}}]
+                    "gl_summary": [
+                        {{
+                            "gl_code": "5301.1",
+                            "gl_name": "Dairy",
+                            "subtotal": 0.00
+                        }}
+                    ],
+                    "items": [
+                        {{
+                            "page_number": 1,
+                            "item_code": "SKU",
+                            "description": "Description",
+                            "amount": 0.00,
+                            "gl_code": "5301.1",
+                            "gl_name": "Dairy"
+                        }}
+                    ]
                 }}
                 """
 
@@ -276,6 +327,10 @@ if uploaded_file is not None:
             f"⚠️ Diff: ${abs(calc_sum - inv_tot):,.2f} (Calc ${calc_sum:,.2f} vs"
             f" Inv ${inv_tot:,.2f})"
         )
+
+      with st.expander("🔍 View All Extracted Line Items", expanded=False):
+        df_items = pd.DataFrame(data.get("items", []))
+        st.dataframe(df_items, use_container_width=True, hide_index=True)
 
       d_col1, d_col2 = st.columns(2)
       if is_pdf:
