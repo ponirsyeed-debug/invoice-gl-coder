@@ -9,16 +9,16 @@ from google.genai import types
 from PIL import Image
 
 st.set_page_config(
-    page_title="Universal Invoice GL Coder & Visual Annotator",
-    page_icon="✍️",
+    page_title="Universal Invoice GL Coder & PDF Stamper",
+    page_icon="⚡",
     layout="wide",
 )
 
-st.title("✍️ Smart Invoice GL Coder & Visual Markup Annotator")
+st.title("⚡ Fast Invoice GL Coder & Annotated PDF Generator")
 st.caption(
-    "Powered by HEX DEL RIO, LC Chart of Accounts. Analyzes image & text"
-    " scans, draws red-ink markup arrows to line items, and stamps the GL"
-    " summary on the PDF."
+    "Powered by HEX DEL RIO, LC Chart of Accounts. Automatically extracts"
+    " multi-page invoices, validates math, and draws handwritten-style red pen"
+    " markup annotations directly on the PDF in the correct orientation."
 )
 
 # 1. API Key Setup
@@ -31,6 +31,7 @@ if not api_key:
   st.stop()
 
 client = genai.Client(api_key=api_key)
+
 ACTIVE_MODEL = "gemini-3.6-flash"
 
 uploaded_file = st.file_uploader(
@@ -56,74 +57,84 @@ def get_pdf_images_fast(pdf_bytes):
   return images
 
 
-# 3. AI-Powered Visual Coordinate Annotation Stamper
-def stamp_visual_markup_on_pdf(pdf_bytes, data):
+# 3. Orientation-Aware Red Pen Markup Annotation Stamper
+def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-  red_color = (0.85, 0.05, 0.05)
+  red_color = (0.8, 0.05, 0.05)
 
-  # Draw Red-Ink Arrows on items using AI Vision coordinates
-  for item in data.get("items", []):
-    page_idx = int(item.get("page_number", 1)) - 1
-    if page_idx < 0 or page_idx >= len(doc):
-      page_idx = 0
+  # Annotate line items with arrows matching page orientation
+  for page in doc:
+    rot = page.rotation
 
-    page = doc[page_idx]
-    w = page.rect.width
-    h = page.rect.height
+    for item in data.get("items", []):
+      search_term = str(item.get("item_code", "")).strip()
+      if not search_term or len(search_term) < 3:
+        search_term = str(item.get("description", ""))[:10].strip()
 
-    box = item.get("box_2d", None)
-    if box and len(box) == 4:
-      ymin, xmin, ymax, xmax = box
-      x_start = (xmax / 1000.0) * w
-      y_mid = ((ymin + ymax) / 2000.0) * h
+      if not search_term:
+        continue
 
-      # Keep arrow within page bounds
-      if x_start + 45 > w:
-        x_start = w - 50
+      rects = page.search_for(search_term)
+      for rect in rects[:1]:
+        # Draw arrow based on visual orientation
+        if rot in (0, 180):
+          start_p = fitz.Point(rect.x1 + 4, rect.y0 + (rect.height / 2))
+          mid_p = fitz.Point(rect.x1 + 18, rect.y0 + (rect.height / 2) - 2)
+          end_p = fitz.Point(rect.x1 + 32, rect.y0 + (rect.height / 2))
+          text_p = fitz.Point(end_p.x + 4, end_p.y + 3)
+          p1 = fitz.Point(end_p.x - 4, end_p.y - 3)
+          p2 = fitz.Point(end_p.x - 4, end_p.y + 3)
+        else:  # 90 or 270 degree rotation
+          start_p = fitz.Point(rect.x0 + (rect.width / 2), rect.y1 + 4)
+          mid_p = fitz.Point(rect.x0 + (rect.width / 2) - 2, rect.y1 + 18)
+          end_p = fitz.Point(rect.x0 + (rect.width / 2), rect.y1 + 32)
+          text_p = fitz.Point(end_p.x + 3, end_p.y + 4)
+          p1 = fitz.Point(end_p.x - 3, end_p.y - 4)
+          p2 = fitz.Point(end_p.x + 3, end_p.y - 4)
 
-      p_start = fitz.Point(x_start + 3, y_mid)
-      p_mid = fitz.Point(x_start + 18, y_mid - 2)
-      p_end = fitz.Point(x_start + 32, y_mid)
+        page.draw_polyline([start_p, mid_p, end_p], color=red_color, width=1.2)
+        page.draw_line(p1, end_p, color=red_color, width=1.2)
+        page.draw_line(p2, end_p, color=red_color, width=1.2)
 
-      # Draw polyline pen arrow
-      page.draw_polyline([p_start, p_mid, p_end], color=red_color, width=1.3)
-      page.draw_line(
-          fitz.Point(p_end.x - 4, p_end.y - 3), p_end, color=red_color, width=1.3
-      )
-      page.draw_line(
-          fitz.Point(p_end.x - 4, p_end.y + 3), p_end, color=red_color, width=1.3
-      )
+        annotation_text = f"{item.get('gl_code', '')} ({str(item.get('gl_name', ''))[:8]})"
+        page.insert_text(
+            text_p,
+            annotation_text,
+            fontsize=7.5,
+            fontname="Courier-Bold",
+            color=red_color,
+            rotate=rot,
+        )
 
-      # Write GL Code in bold red pen ink
-      label = (
-          f"{item.get('gl_code', '')} ({str(item.get('gl_name', ''))[:8]})"
-      )
-      page.insert_text(
-          fitz.Point(p_end.x + 3, y_mid + 3),
-          label,
-          fontsize=7.5,
-          fontname="Courier-Bold",
-          color=red_color,
-      )
-
-  # Draw handwritten GL Summary Block on last page
+  # Stamp final GL Summary Block matching the page's exact rotation
   last_page = doc[-1]
-  pw = last_page.rect.width
-  ph = last_page.rect.height
+  rot = last_page.rotation
+  w = last_page.rect.width
+  h = last_page.rect.height
 
-  summary_rect = fitz.Rect(pw - 230, ph - 260, pw - 15, ph - 20)
+  # Position summary box relative to unrotated coordinates
+  if rot == 0:
+    summary_rect = fitz.Rect(w - 245, h - 290, w - 15, h - 20)
+  elif rot == 90:
+    summary_rect = fitz.Rect(w - 290, 15, w - 20, 245)
+  elif rot == 270:
+    summary_rect = fitz.Rect(15, h - 245, 290, h - 15)
+  else:  # 180
+    summary_rect = fitz.Rect(15, 20, 245, 290)
+
   last_page.draw_rect(
-      summary_rect, color=red_color, fill=(1, 0.96, 0.96), width=1.4
+      summary_rect, color=red_color, fill=(1, 0.96, 0.96), width=1.3
   )
 
-  summary_lines = ["-- GL ACCOUNTING SUMMARY --"]
+  summary_lines = ["--- REVIEWED & CODED ---"]
   for item in data.get("gl_summary", []):
     summary_lines.append(
-        f"{str(item['gl_name'])[:14]} {item['gl_code']}:"
-        f" ${float(item['subtotal']):,.2f}"
+        f"{str(item['gl_name'])[:12]} {item['gl_code']}: ${float(item['subtotal']):,.2f}"
     )
-  summary_lines.append("----------------------------")
-  summary_lines.append(f"TOTAL: ${float(data.get('invoice_total', 0.0)):,.2f}")
+  summary_lines.append("------------------------")
+  summary_lines.append(
+      f"TOTAL: ${float(data.get('invoice_total', 0.0)):,.2f}"
+  )
 
   last_page.insert_textbox(
       summary_rect + (6, 6, -6, -6),
@@ -131,6 +142,7 @@ def stamp_visual_markup_on_pdf(pdf_bytes, data):
       fontsize=8,
       fontname="Courier-Bold",
       color=red_color,
+      rotate=rot,
   )
 
   output_pdf = io.BytesIO()
@@ -178,39 +190,65 @@ if uploaded_file is not None:
 
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
-    st.info(f"📑 {total_pages} Page(s) ready for fast visual analysis.")
+    st.info(f"📑 {total_pages} Page(s) ready for fast analysis.")
 
     if st.button("⚡ Fast Analyze & Code", type="primary"):
-      with st.spinner(f"Detecting items and coordinates on all pages..."):
+      with st.spinner(
+          f"Analyzing all {total_pages} page(s) using {ACTIVE_MODEL}..."
+      ):
         prompt = f"""
                 You are an expert hospitality & hotel accountant for HEX DEL RIO, LC.
-                Analyze all {total_pages} page(s) of this vendor invoice scan. 
-                Extract the line items and detect the visual bounding box (box_2d) in normalized coordinates [ymin, xmin, ymax, xmax] (0 to 1000 scale) for each line item on its respective page.
+                Analyze all {total_pages} page(s) of this vendor invoice. Extract every purchased line item, identify the vendor, invoice date, number, total, and categorize each line item strictly into the official HEX DEL RIO Chart of Accounts (COA).
 
-                Official HEX DEL RIO Chart of Accounts:
+                Official HEX DEL RIO Chart of Accounts Reference:
+                --- FOOD & BEVERAGE COGS (5300 series) ---
                 - 5301.1: Dairy (Milk, Butter, Cheese, Yogurt, Creamer, Eggs)
                 - 5301.2: Protein, Meats etc. (Bacon, Sausage, Ham, Poultry, Patties)
                 - 5301.3: Paper & Utensils (Plates, Cups, Cutlery, Straws, Napkins, Bags, Foil, Trash Liners)
-                - 5301.4: Cereal, Breads, and Carbs (Bread, Bagels, Muffins, Waffle mix, Cereal, Pastries)
+                - 5301.4: Cereal, Breads, and Carbs (Bread, Bagels, Muffins, Waffle mix, Cereal, Pastries, Tortillas)
                 - 5301.5: Cinnamon Rolls
-                - 5301.6: Fruit & Produce (Fresh apples, Bananas, Melons, Potatoes, Veggies)
-                - 5301.7: Condiments (Salsa, Jelly, Syrup, Butter cups, Ketchup, Mustard, Mayo, Spices)
+                - 5301.6: Fruit & Produce (Fresh apples, Bananas, Melons, Potatoes, Veggies, Garnish)
+                - 5301.7: Condiments (Salsa, Jelly, Syrup, Butter cups, Ketchup, Mustard, Mayo, Spices, Dressings)
                 - 5302: Beverage (Dispenser juices, Soda syrup, Tea bags, Cocoa)
                 - 5302.1: Coffee (Brewed coffee packs, Coffee beans)
                 - 5303: Food & Bev Sales Tax (Sales tax on food/beverage distributor invoices)
-                - 5210.1: Cleaning Supplies (Bleach, floor cleaner, degreaser, disinfectants, janitorial)
-                - 5210.2: Guest Room - Material (Shampoo, body wash, soap, conditioner, amenities)
-                - 5250.1: Chemicals/Soap & Supply (Laundry detergents, softeners)
-                - 5250.3: Linen Replacement (Bed sheets, Towels, Mattress pads, Blankets)
-                - 6178: Weekly Guest Reception / Social Hour food & beverage
-                - 6701.1: Swimming Pool (Pool chemicals, chlorine)
-                - 6701.4: Waste Removal (Dumpster, trash pickup)
-                - 6701.5: Pest Control
-                - 6702.1: Contracted Repairs
-                - 6801: Electricity | 6802: Gas | 6803: Water & Sewer
-                - 6902.1: Bank Charges
+                - 5303.1: Gas charged for delivery (Fuel surcharges)
 
-                Return strictly JSON:
+                --- ROOMS, HOUSEKEEPING & LAUNDRY (5200 series) ---
+                - 5210.1: Cleaning Supplies (Bleach, floor cleaner, degreaser, disinfectants, janitorial)
+                - 5210.2: Guest Room - Material (Shampoo, body wash, soap, conditioner, lotions, amenities)
+                - 5210.3: Operating supplies (Housekeeping caddies, spray bottles, smallware)
+                - 5210.4: Guest Room Supplies Sales Tax (Tax on guest supplies/amenities)
+                - 5250.1: Chemicals/Soap & Supply (Laundry detergents, fabric softeners, bleach for laundry)
+                - 5250.2: Laundry Equip Repair & Replace
+                - 5250.3: Linen Replacement (Bed sheets, Pillowcases, Duvet covers, Towels, Mattress pads, Blankets)
+
+                --- PROPERTY OPERATIONS, UTILITIES & MAINTENANCE (6700 - 6800 series) ---
+                - 6701.1: Swimming Pool (Pool chemicals, chlorine, pool maintenance)
+                - 6701.2: Elevators (Elevator contract service / maintenance)
+                - 6701.3: Grounds & Landscape (Landscaping, lawn maintenance)
+                - 6701.4: Waste Removal (Dumpster, trash pickup, waste services)
+                - 6701.5: Pest Control (Exterminator, pest services)
+                - 6701.6: Fire System Test & Monitor
+                - 6702.1: Contracted Repairs (Dryer repair, HVAC repair, electrical contract work)
+                - 6702.6: Plumbing & HVAC supplies
+                - 6702.9: Light Bulbs
+                - 6703: Operating Supplies - Maint (Hardware, paint, filters, tools)
+                - 6750: Cable TV
+                - 6801: Electricity (Electric utility bills)
+                - 6802: Gas (Natural gas utility bills)
+                - 6803: Water & Sewer utility
+
+                --- ADMIN, MARKETING & FRANCHISE (6000 - 6600 series) ---
+                - 6044: Paper, Ink & Oper Supplies (Front desk office paper, toner, printer ink)
+                - 6178: Weekly Guest Reception / Social Hour food & beverage
+                - 6180: Travel Agent Fees & Commissions
+                - 6601.1: Franchise Royalty Fee
+                - 6601.3: Brand Reservation Charges
+                - 6602: Frequent Guest Plan (IHG Rewards / Member stay fees)
+                - 6902.1: Bank Charges (Returned payment fees, service fees)
+
+                Return strictly JSON matching this structure:
                 {{
                     "vendor": "Vendor Name",
                     "invoice_number": "Invoice Number",
@@ -230,8 +268,7 @@ if uploaded_file is not None:
                             "description": "Description",
                             "amount": 0.00,
                             "gl_code": "5301.1",
-                            "gl_name": "Dairy",
-                            "box_2d": [ymin, xmin, ymax, xmax]
+                            "gl_name": "Dairy"
                         }}
                     ]
                 }}
@@ -286,17 +323,17 @@ if uploaded_file is not None:
             f" Inv ${inv_tot:,.2f})"
         )
 
-      with st.expander("🔍 View Extracted Line Items", expanded=False):
+      with st.expander("🔍 View All Extracted Line Items", expanded=False):
         df_items = pd.DataFrame(data.get("items", []))
         st.dataframe(df_items, use_container_width=True, hide_index=True)
 
       d_col1, d_col2 = st.columns(2)
       if is_pdf:
-        stamped_pdf_bytes = stamp_visual_markup_on_pdf(file_bytes, data)
+        stamped_pdf_bytes = stamp_gl_summary_and_arrows_on_pdf(file_bytes, data)
         d_col1.download_button(
             label="📄 Download Annotated PDF",
             data=stamped_pdf_bytes,
-            file_name=f"Annotated_{data.get('invoice_number', 'Invoice')}.pdf",
+            file_name=f"Stamped_{data.get('invoice_number', 'Invoice')}.pdf",
             mime="application/pdf",
             type="primary",
         )
