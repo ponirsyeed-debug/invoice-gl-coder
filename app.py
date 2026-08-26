@@ -17,8 +17,8 @@ st.set_page_config(
 st.title("⚡ Fast Invoice GL Coder & Annotated PDF Generator")
 st.caption(
     "Powered by HEX DEL RIO, LC Chart of Accounts. Automatically extracts"
-    " multi-page invoices, validates math, and draws handwritten-style red pen"
-    " markup annotations directly on the PDF in the correct orientation."
+    " multi-page invoices, validates math, and stamps the final GL summary"
+    " block in the correct PDF orientation."
 )
 
 # 1. API Key Setup
@@ -57,62 +57,18 @@ def get_pdf_images_fast(pdf_bytes):
   return images
 
 
-# 3. Orientation-Aware Red Pen Markup Annotation Stamper
-def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
+# 3. Orientation-Aware GL Summary Box Stamper (No line marks)
+def stamp_gl_summary_on_pdf(pdf_bytes, data):
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
   red_color = (0.8, 0.05, 0.05)
 
-  # Annotate line items with arrows matching page orientation
-  for page in doc:
-    rot = page.rotation
-
-    for item in data.get("items", []):
-      search_term = str(item.get("item_code", "")).strip()
-      if not search_term or len(search_term) < 3:
-        search_term = str(item.get("description", ""))[:10].strip()
-
-      if not search_term:
-        continue
-
-      rects = page.search_for(search_term)
-      for rect in rects[:1]:
-        # Draw arrow based on visual orientation
-        if rot in (0, 180):
-          start_p = fitz.Point(rect.x1 + 4, rect.y0 + (rect.height / 2))
-          mid_p = fitz.Point(rect.x1 + 18, rect.y0 + (rect.height / 2) - 2)
-          end_p = fitz.Point(rect.x1 + 32, rect.y0 + (rect.height / 2))
-          text_p = fitz.Point(end_p.x + 4, end_p.y + 3)
-          p1 = fitz.Point(end_p.x - 4, end_p.y - 3)
-          p2 = fitz.Point(end_p.x - 4, end_p.y + 3)
-        else:  # 90 or 270 degree rotation
-          start_p = fitz.Point(rect.x0 + (rect.width / 2), rect.y1 + 4)
-          mid_p = fitz.Point(rect.x0 + (rect.width / 2) - 2, rect.y1 + 18)
-          end_p = fitz.Point(rect.x0 + (rect.width / 2), rect.y1 + 32)
-          text_p = fitz.Point(end_p.x + 3, end_p.y + 4)
-          p1 = fitz.Point(end_p.x - 3, end_p.y - 4)
-          p2 = fitz.Point(end_p.x + 3, end_p.y - 4)
-
-        page.draw_polyline([start_p, mid_p, end_p], color=red_color, width=1.2)
-        page.draw_line(p1, end_p, color=red_color, width=1.2)
-        page.draw_line(p2, end_p, color=red_color, width=1.2)
-
-        annotation_text = f"{item.get('gl_code', '')} ({str(item.get('gl_name', ''))[:8]})"
-        page.insert_text(
-            text_p,
-            annotation_text,
-            fontsize=7.5,
-            fontname="Courier-Bold",
-            color=red_color,
-            rotate=rot,
-        )
-
-  # Stamp final GL Summary Block matching the page's exact rotation
+  # Stamp GL Summary Block on the last page with correct rotation
   last_page = doc[-1]
   rot = last_page.rotation
   w = last_page.rect.width
   h = last_page.rect.height
 
-  # Position summary box relative to unrotated coordinates
+  # Position summary box relative to page coordinates and rotation
   if rot == 0:
     summary_rect = fitz.Rect(w - 245, h - 290, w - 15, h - 20)
   elif rot == 90:
@@ -329,7 +285,7 @@ if uploaded_file is not None:
 
       d_col1, d_col2 = st.columns(2)
       if is_pdf:
-        stamped_pdf_bytes = stamp_gl_summary_and_arrows_on_pdf(file_bytes, data)
+        stamped_pdf_bytes = stamp_gl_summary_on_pdf(file_bytes, data)
         d_col1.download_button(
             label="📄 Download Annotated PDF",
             data=stamped_pdf_bytes,
