@@ -28,7 +28,7 @@ if not api_key:
   api_key = st.sidebar.text_input("Enter Gemini API Key", type="password")
 
 if not api_key:
-  st.warning("Please configure your GEMINI_API_KEY to continue.")
+  st.warning("Please configure your GEMINI_API_KEY in Secrets or sidebar.")
   st.stop()
 
 client = genai.Client(api_key=api_key)
@@ -65,29 +65,21 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
   red_color = (0.8, 0.05, 0.05)
 
-  # Stamp line-item annotations on relevant pages
   for page in doc:
     for item in data.get("items", []):
       search_term = item.get("item_code", "").strip()
       if not search_term or len(search_term) < 3:
-        # Fallback to search by first 12 characters of description
         search_term = item.get("description", "")[:14].strip()
 
       if not search_term:
         continue
 
       rects = page.search_for(search_term)
-      for rect in rects[:1]:  # Annotate the first match on page
+      for rect in rects[:1]:
         arrow_start = fitz.Point(rect.x1 + 10, rect.y0 + (rect.height / 2))
         arrow_end = fitz.Point(rect.x1 + 35, rect.y0 + (rect.height / 2))
 
-        # Draw red markup arrow ->
-        page.draw_line(
-            arrow_start,
-            arrow_end,
-            color=red_color,
-            width=1.2,
-        )
+        page.draw_line(arrow_start, arrow_end, color=red_color, width=1.2)
         page.draw_line(
             fitz.Point(arrow_end.x - 4, arrow_end.y - 3),
             arrow_end,
@@ -101,8 +93,9 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
             width=1.2,
         )
 
-        # Write corrected GL code & short name
-        annotation_text = f"{item.get('gl_code', '')} ({item.get('gl_name', '')[:8]})"
+        annotation_text = (
+            f"{item.get('gl_code', '')} ({item.get('gl_name', '')[:8]})"
+        )
         page.insert_text(
             fitz.Point(arrow_end.x + 5, arrow_end.y + 3),
             annotation_text,
@@ -111,7 +104,6 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
             color=red_color,
         )
 
-  # Stamp final GL Summary Block on the last page
   last_page = doc[-1]
   summary_rect = fitz.Rect(
       last_page.rect.width - 250,
@@ -147,18 +139,31 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
 
 
 # -------------------------------------------------------------
-# 3. AI Extraction with Fallback Chain
+# 3. Dynamic Model Discovery (Prevents 404 Errors)
 # -------------------------------------------------------------
-def call_ai_with_fallback(contents):
-  candidate_models = [
-      "gemini-2.5-flash",
-      "gemini-1.5-flash",
-      "gemini-2.0-flash",
-      "gemini-3-flash",
-  ]
+def get_available_models():
+  """Discovers all valid models supporting content generation on this API key."""
+  valid_models = []
+  try:
+    for m in client.models.list():
+      name = m.name.replace("models/", "")
+      if "flash" in name or "pro" in name:
+        valid_models.append(name)
+  except Exception:
+    pass
+
+  # Fallback priority list if list query fails
+  if not valid_models:
+    valid_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+  return valid_models
+
+
+def call_ai_with_dynamic_models(contents):
+  """Calls Gemini using only verified active models on the account with automatic retry on 503/429."""
+  available = get_available_models()
   last_err = None
 
-  for model_name in candidate_models:
+  for model_name in available:
     for attempt in range(2):
       try:
         response = client.models.generate_content(
@@ -176,9 +181,9 @@ def call_ai_with_fallback(contents):
           time.sleep(2)
           continue
         else:
-          break
+          break  # If model is 404, immediately try next available model
 
-  raise Exception(f"All model endpoints busy or failed. Last error: {last_err}")
+  raise Exception(f"All available models failed. Last error: {last_err}")
 
 
 # -------------------------------------------------------------
@@ -235,11 +240,11 @@ if uploaded_file is not None:
         use_container_width=True,
     )
 
-  # --- Right Column: Analysis & Output ---
+  # --- Right Column: Processing & GL Assignment ---
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
     if st.button("🚀 Analyze & Code Entire Invoice", type="primary"):
-      with st.spinner("Extracting line items and calculating GL codes..."):
+      with st.spinner("Discovering active model and coding invoice..."):
         prompt = """
                 You are an expert hospitality & hotel accountant.
                 Analyze all pages of this vendor invoice. Extract header data, itemize every purchased line item with its exact SKU/code/description and cost, and aggregate category subtotals into hotel General Ledger (GL) accounts.
@@ -300,7 +305,7 @@ if uploaded_file is not None:
           )
 
         try:
-          parsed_data, used_model = call_ai_with_fallback(contents)
+          parsed_data, used_model = call_ai_with_dynamic_models(contents)
           st.session_state["invoice_data"] = parsed_data
           st.toast(
               f"Invoice analyzed successfully via {used_model}!", icon="✅"
@@ -308,7 +313,7 @@ if uploaded_file is not None:
         except Exception as e:
           st.error(f"Generation error: {e}")
 
-    # Display results only if current invoice has been analyzed
+    # Display results
     if "invoice_data" in st.session_state:
       data = st.session_state["invoice_data"]
 
