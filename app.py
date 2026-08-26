@@ -17,20 +17,26 @@ st.set_page_config(
 st.title("📑 Smart Invoice GL Coder & Annotated PDF Generator")
 st.caption(
     "Upload any vendor invoice (Sysco, Guest Supply, HD Supply, Utilities,"
-    " etc.). The AI extracts GL categories, verifies balance totals, and"
-    " stamps the summary directly onto your PDF."
+    " etc.). The AI extracts GL categories, checks balance math, and stamps the"
+    " GL summary directly onto your PDF."
 )
 
-# API Key handling from Streamlit Secrets or sidebar fallback
+# Sidebar API Key & Model Configuration
 api_key = st.secrets.get("GEMINI_API_KEY", None)
 if not api_key:
-  api_key = st.sidebar.text_input("Gemini API Key", type="password")
+  api_key = st.sidebar.text_input("Enter Gemini API Key", type="password")
 
 if not api_key:
-  st.warning("Please configure your GEMINI_API_KEY in Secrets or sidebar.")
+  st.warning("Please configure your GEMINI_API_KEY to continue.")
   st.stop()
 
 client = genai.Client(api_key=api_key)
+
+selected_model = st.sidebar.selectbox(
+    "AI Model",
+    ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"],
+    index=0,
+)
 
 uploaded_file = st.file_uploader(
     "Upload Vendor Invoice (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"]
@@ -103,7 +109,7 @@ if uploaded_file is not None:
   with col_right:
     st.subheader("⚙️ Processing & GL Assignment")
     if st.button("🚀 Analyze & Generate Coded Breakdown", type="primary"):
-      with st.spinner("Analyzing invoice & assigning GL codes..."):
+      with st.spinner("Analyzing document structure & assigning GL codes..."):
         prompt = """
                 You are an expert hospitality & hotel accountant.
                 Analyze all pages of this vendor invoice. Extract header data, itemize the purchased lines, and aggregate the subtotals strictly into standard hotel General Ledger (GL) accounts.
@@ -129,8 +135,8 @@ if uploaded_file is not None:
 
                 Return ONLY valid JSON with this exact structure:
                 {
-                    "vendor": "Vendor Name",
-                    "invoice_number": "Invoice Number",
+                    "vendor": "Extracted Vendor Name",
+                    "invoice_number": "Invoice / Order #",
                     "invoice_date": "YYYY-MM-DD",
                     "invoice_total": 0.00,
                     "gl_summary": [
@@ -142,8 +148,8 @@ if uploaded_file is not None:
                     ],
                     "items": [
                         {
-                            "item_code": "SKU",
-                            "description": "Description",
+                            "item_code": "Item SKU / Pack",
+                            "description": "Short description",
                             "amount": 0.00,
                             "gl_code": "5301.1",
                             "gl_name": "Dairy"
@@ -152,7 +158,7 @@ if uploaded_file is not None:
                 }
                 """
 
-        # Convert images into SDK part bytes
+        # Convert images to JPEG byte parts for SDK compatibility
         contents = [prompt]
         for img in images:
           img_buffer = io.BytesIO()
@@ -166,7 +172,7 @@ if uploaded_file is not None:
 
         try:
           response = client.models.generate_content(
-              model="gemini-2.0-flash",
+              model=selected_model,
               contents=contents,
               config=types.GenerateContentConfig(
                   response_mime_type="application/json"
