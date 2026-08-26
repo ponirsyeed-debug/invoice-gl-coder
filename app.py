@@ -34,7 +34,7 @@ client = genai.Client(api_key=api_key)
 
 selected_model = st.sidebar.selectbox(
     "AI Model",
-    ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"],
+    ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-3-flash"],
     index=0,
 )
 
