@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import fitz  # PyMuPDF
 import pandas as pd
 import pypdfium2 as pdfium
@@ -26,6 +27,26 @@ if not api_key:
   st.stop()
 
 client = genai.Client(api_key=api_key)
+
+
+# Auto-detect available fast models on this key
+@st.cache_data(ttl=3600)
+def fetch_active_models(_client_ref):
+  active = []
+  try:
+    for m in _client_ref.models.list():
+      name = m.name.replace("models/", "")
+      if "flash" in name:
+        active.append(name)
+  except Exception:
+    pass
+  if not active:
+    active = ["gemini-2.5-flash", "gemini-1.5-flash"]
+  return active
+
+
+detected_models = fetch_active_models(client)
+selected_model = st.sidebar.selectbox("Active AI Model", detected_models, index=0)
 
 uploaded_file = st.file_uploader(
     "Upload Vendor Invoice (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"]
@@ -56,7 +77,6 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
   red_color = (0.8, 0.05, 0.05)
 
-  # Stamp markup arrows next to line items
   for page in doc:
     for item in data.get("items", []):
       search_term = str(item.get("item_code", "")).strip()
@@ -96,7 +116,6 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
             color=red_color,
         )
 
-  # Stamp final GL Summary Block on last page
   last_page = doc[-1]
   summary_rect = fitz.Rect(
       last_page.rect.width - 240,
@@ -133,31 +152,7 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   return output_pdf.getvalue()
 
 
-# 4. Cached Fast Execution Engine
-def run_fast_gemini(contents):
-  # gemini-2.5-flash is optimized for high-speed multimodal extraction
-  priority_models = [
-      "gemini-2.5-flash",
-      "gemini-1.5-flash",
-      "gemini-2.0-flash",
-  ]
-  for model_name in priority_models:
-    try:
-      response = client.models.generate_content(
-          model=model_name,
-          contents=contents,
-          config=types.GenerateContentConfig(
-              response_mime_type="application/json",
-              temperature=0.1,  # Low temperature makes JSON parsing faster and more deterministic
-          ),
-      )
-      return json.loads(response.text), model_name
-    except Exception:
-      continue
-  raise Exception("Could not connect to fast Gemini endpoint.")
-
-
-# 5. UI Layout
+# 4. UI Layout
 if uploaded_file is not None:
   file_bytes = uploaded_file.getvalue()
   is_pdf = uploaded_file.name.lower().endswith(".pdf")
@@ -199,7 +194,7 @@ if uploaded_file is not None:
     st.info(f"📑 {total_pages} Page(s) ready for fast analysis.")
 
     if st.button("⚡ Fast Analyze & Code", type="primary"):
-      with st.spinner("Processing invoice in seconds..."):
+      with st.spinner(f"Analyzing all {total_pages} page(s)..."):
         prompt = f"""
                 Analyze all {total_pages} page(s) of this hotel invoice. Extract totals and categorize into GL accounts:
                 - 5210.1: Cleaning/Chemicals/Janitorial
@@ -234,8 +229,7 @@ if uploaded_file is not None:
         for idx, img in enumerate(images, start=1):
           contents.append(f"Page {idx}")
           img_buffer = io.BytesIO()
-          # Compressed JPEG payload for quick upload over network
-          img.convert("RGB").save(img_buffer, format="JPEG", quality=65)
+          img.convert("RGB").save(img_buffer, format="JPEG", quality=70)
           contents.append(
               types.Part.from_bytes(
                   data=img_buffer.getvalue(), mime_type="image/jpeg"
@@ -243,11 +237,18 @@ if uploaded_file is not None:
           )
 
         try:
-          parsed_data, used_model = run_fast_gemini(contents)
-          st.session_state["invoice_data"] = parsed_data
-          st.toast(f"⚡ Completed in record time via {used_model}!", icon="🚀")
+          response = client.models.generate_content(
+              model=selected_model,
+              contents=contents,
+              config=types.GenerateContentConfig(
+                  response_mime_type="application/json",
+                  temperature=0.1,
+              ),
+          )
+          st.session_state["invoice_data"] = json.loads(response.text)
+          st.toast(f"⚡ Completed via {selected_model}!", icon="🚀")
         except Exception as e:
-          st.error(f"Error: {e}")
+          st.error(f"API Error ({selected_model}): {e}")
 
     if "invoice_data" in st.session_state:
       data = st.session_state["invoice_data"]
