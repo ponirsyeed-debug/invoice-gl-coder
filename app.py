@@ -31,27 +31,8 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-
-# Auto-detect available active models
-@st.cache_data(ttl=3600)
-def fetch_active_models(_client_ref):
-  active = []
-  try:
-    for m in _client_ref.models.list():
-      name = m.name.replace("models/", "")
-      if "3.6" in name or "3" in name or "flash" in name:
-        active.append(name)
-  except Exception:
-    pass
-  if not active:
-    active = ["gemini-3.6-flash", "gemini-3.6-pro", "gemini-3-flash"]
-  return active
-
-
-detected_models = fetch_active_models(client)
-selected_model = st.sidebar.selectbox(
-    "Active AI Model", detected_models, index=0
-)
+# Fixed Active Model Endpoint
+ACTIVE_MODEL = "gemini-3.6-flash"
 
 uploaded_file = st.file_uploader(
     "Upload Vendor Invoice (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"]
@@ -156,7 +137,7 @@ def stamp_gl_summary_and_arrows_on_pdf(pdf_bytes, data):
   return output_pdf.getvalue()
 
 
-# 4. UI Layout & Multi-Page AI Engine
+# 4. UI Layout & Execution
 if uploaded_file is not None:
   file_bytes = uploaded_file.getvalue()
   is_pdf = uploaded_file.name.lower().endswith(".pdf")
@@ -199,13 +180,13 @@ if uploaded_file is not None:
 
     if st.button("⚡ Fast Analyze & Code", type="primary"):
       with st.spinner(
-          f"Analyzing all {total_pages} page(s) using {selected_model}..."
+          f"Analyzing all {total_pages} page(s) using {ACTIVE_MODEL}..."
       ):
         prompt = f"""
                 You are an expert hospitality & hotel accountant for HEX DEL RIO, LC.
                 Analyze all {total_pages} page(s) of this vendor invoice. Extract every purchased line item, identify the vendor, invoice date, number, total, and categorize each line item strictly into the official HEX DEL RIO Chart of Accounts (COA).
 
-                Official HEX DEL RIO Chart of Accounts Reference (DRTTX COA):
+                Official HEX DEL RIO Chart of Accounts Reference:
                 --- FOOD & BEVERAGE COGS (5300 series) ---
                 - 5301.1: Dairy (Milk, Butter, Cheese, Yogurt, Creamer, Eggs)
                 - 5301.2: Protein, Meats etc. (Bacon, Sausage, Ham, Poultry, Patties)
@@ -292,7 +273,7 @@ if uploaded_file is not None:
 
         try:
           response = client.models.generate_content(
-              model=selected_model,
+              model=ACTIVE_MODEL,
               contents=contents,
               config=types.GenerateContentConfig(
                   response_mime_type="application/json",
@@ -300,9 +281,9 @@ if uploaded_file is not None:
               ),
           )
           st.session_state["invoice_data"] = json.loads(response.text)
-          st.toast(f"⚡ Completed via {selected_model}!", icon="🚀")
+          st.toast(f"⚡ Completed via {ACTIVE_MODEL}!", icon="🚀")
         except Exception as e:
-          st.error(f"API Error ({selected_model}): {e}")
+          st.error(f"API Error ({ACTIVE_MODEL}): {e}")
 
     if "invoice_data" in st.session_state:
       data = st.session_state["invoice_data"]
