@@ -17,8 +17,8 @@ st.set_page_config(
 st.title("⚡ Fast Invoice GL Coder & Annotated PDF Generator")
 st.caption(
     "Powered by HEX DEL RIO, LC Chart of Accounts. Automatically extracts"
-    " multi-page invoices, validates math, and stamps the final GL summary"
-    " block in the correct PDF orientation."
+    " multi-page invoices, validates math, and stamps an auto-fitted GL summary"
+    " box in the correct PDF orientation."
 )
 
 # 1. API Key Setup
@@ -57,45 +57,63 @@ def get_pdf_images_fast(pdf_bytes):
   return images
 
 
-# 3. Orientation-Aware GL Summary Box Stamper (No line marks)
+# 3. Dynamic Auto-Sizing Orientation-Aware GL Summary Stamper
 def stamp_gl_summary_on_pdf(pdf_bytes, data):
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
   red_color = (0.8, 0.05, 0.05)
 
-  # Stamp GL Summary Block on the last page with correct rotation
   last_page = doc[-1]
   rot = last_page.rotation
   w = last_page.rect.width
   h = last_page.rect.height
 
-  # Position summary box relative to page coordinates and rotation
-  if rot == 0:
-    summary_rect = fitz.Rect(w - 245, h - 290, w - 15, h - 20)
-  elif rot == 90:
-    summary_rect = fitz.Rect(w - 290, 15, w - 20, 245)
-  elif rot == 270:
-    summary_rect = fitz.Rect(15, h - 245, 290, h - 15)
-  else:  # 180
-    summary_rect = fitz.Rect(15, 20, 245, 290)
-
-  last_page.draw_rect(
-      summary_rect, color=red_color, fill=(1, 0.96, 0.96), width=1.3
-  )
-
+  # Build the summary lines
   summary_lines = ["--- REVIEWED & CODED ---"]
   for item in data.get("gl_summary", []):
     summary_lines.append(
-        f"{str(item['gl_name'])[:12]} {item['gl_code']}: ${float(item['subtotal']):,.2f}"
+        f"{str(item['gl_name'])[:14]} {item['gl_code']}: ${float(item['subtotal']):,.2f}"
     )
   summary_lines.append("------------------------")
-  summary_lines.append(
-      f"TOTAL: ${float(data.get('invoice_total', 0.0)):,.2f}"
+  summary_lines.append(f"TOTAL: ${float(data.get('invoice_total', 0.0)):,.2f}")
+
+  # Calculate dynamic height based on number of items to prevent empty whitespace
+  line_count = len(summary_lines)
+  font_size = 8
+  line_height = 11.5
+  padding = 14
+
+  box_w = 205
+  box_h = (line_count * line_height) + padding
+  margin = 15
+
+  # Determine rectangle based on rotation angle
+  if rot == 0:
+    summary_rect = fitz.Rect(
+        w - box_w - margin, h - box_h - margin, w - margin, h - margin
+    )
+  elif rot == 90:
+    summary_rect = fitz.Rect(
+        w - box_h - margin, margin, w - margin, box_w + margin
+    )
+  elif rot == 270:
+    summary_rect = fitz.Rect(
+        margin, h - box_w - margin, box_h + margin, h - margin
+    )
+  else:  # 180
+    summary_rect = fitz.Rect(
+        margin, margin, box_w + margin, box_h + margin
+    )
+
+  # Draw compact red outline box with light fill
+  last_page.draw_rect(
+      summary_rect, color=red_color, fill=(1, 0.96, 0.96), width=1.2
   )
 
+  # Insert text with correct visual rotation
   last_page.insert_textbox(
-      summary_rect + (6, 6, -6, -6),
+      summary_rect + (5, 5, -5, -5),
       "\n".join(summary_lines),
-      fontsize=8,
+      fontsize=font_size,
       fontname="Courier-Bold",
       color=red_color,
       rotate=rot,
